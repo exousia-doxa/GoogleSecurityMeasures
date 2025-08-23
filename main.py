@@ -509,7 +509,6 @@ def process_alert_requests(gmail_session, admin_session, users_list, team_leader
 
         unique_hash = generate_hash(user_email, user_ip, user_date)
         if unique_hash in alert_log:
-            log({"event": "duplicate_alert_skipped", "hash": unique_hash, "msg_id": message_id})
             continue
 
         user_ou = [user.get("orgUnitPath") for user in users_list if user.get("primaryEmail") == user_email][0]
