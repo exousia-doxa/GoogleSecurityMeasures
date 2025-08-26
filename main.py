@@ -28,7 +28,6 @@ SERVICE_ACCOUNT_FILE = CONFIG["SERVICE_ACCOUNT_FILE"]
 HANDLER_USER = CONFIG["HANDLER_USER"]
 ADMIN_USER = CONFIG["ADMIN_USER"]
 LOG_FILE = CONFIG.get("LOG_FILE", "alerts_log.json")
-AUDIT_LOG_FILE = CONFIG.get("AUDIT_LOG_FILE", "alerts_audit.jsonl")
 ORG_UNIT_TEAM_LEADER_ROLE_ID = CONFIG["ORG_UNIT_TEAM_LEADER_ROLE_ID"]
 ALERT_SENDER_EMAIL = CONFIG.get("ALERT_SENDER_EMAIL", "google-workspace-alerts-noreply@google.com")
 TEMPLATE_DIR = CONFIG.get("TEMPLATE_DIR", "templates")
@@ -124,34 +123,6 @@ def prune_alert_log(log, days=7):
         except Exception:
             continue
     return new
-
-def prune_audit_log(days=7):
-    if not os.path.exists(AUDIT_LOG_FILE):
-        return
-    try:
-        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
-        kept = []
-        with open(AUDIT_LOG_FILE, "r", encoding="utf-8") as f:
-            for line in f:
-                try:
-                    obj = json.loads(line)
-                    ts = obj.get("ts")
-                    if not ts:
-                        continue
-                    dt = datetime.fromisoformat(ts)
-                    if dt.tzinfo is None:
-                        dt = dt.replace(tzinfo=timezone.utc)
-                    if dt > cutoff:
-                        kept.append(line)
-                except Exception:
-                    continue
-        tmp = AUDIT_LOG_FILE + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            for l in kept:
-                f.write(l)
-        os.replace(tmp, AUDIT_LOG_FILE)
-    except Exception:
-        pass
 
 def is_under(user_ou: str, ou_path: str) -> bool:
     def norm(p: str) -> str:
@@ -548,23 +519,29 @@ def process_alert_requests(gmail_session, admin_session, users_list, team_leader
 #  MAIN MAIN MAIN MAIN MAIN MAIN MAIN MAIN MAIN MAIN MAIN MAIN MAIN MAIN MAIN MAIN MAIN MAIN MAIN MAIN MAIN MAIN MAIN  #
 ########################################################################################################################
 
-def main():
+if __name__ == "__main__":
     credentials = service_account.Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=SCOPES)
     simple_gmail_session = build(serviceName="gmail", version="v1", credentials=credentials.with_subject(HANDLER_USER))
-    simple_admin_session = build(serviceName="admin", version="directory_v1", credentials=credentials.with_subject(ADMIN_USER))
-    credentials = service_account.Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=SCOPES).with_subject(ADMIN_USER)
+    simple_admin_session = build(serviceName="admin", version="directory_v1",
+                                 credentials=credentials.with_subject(ADMIN_USER))
+    credentials = service_account.Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE,
+                                                                        scopes=SCOPES).with_subject(ADMIN_USER)
     stand_admin_session = google.auth.transport.requests.AuthorizedSession(credentials)
     del credentials
 
     USERS_LIST = []
-    request = create_session(60, stand_admin_session, "get",'https://admin.googleapis.com/admin/directory/v1/users?customer=my_customer',query_type="&maxResults=100")
+    request = create_session(60, stand_admin_session, "get",
+                             'https://admin.googleapis.com/admin/directory/v1/users?customer=my_customer',
+                             query_type="&maxResults=100")
     for response in request:
         USERS_LIST.extend(response.get("users", []))
     del request, response
 
     role_assignments = []
     team_leader_members = []
-    request = create_session(60, stand_admin_session, "get","https://admin.googleapis.com/admin/directory/v1/customer/my_customer/roleassignments",query_type="?maxResults=100")
+    request = create_session(60, stand_admin_session, "get",
+                             "https://admin.googleapis.com/admin/directory/v1/customer/my_customer/roleassignments",
+                             query_type="?maxResults=100")
     for response in request:
         role_assignments.extend(response.get("items", []))
     for role in role_assignments:
@@ -579,11 +556,7 @@ def main():
 
     alert_log = prune_alert_log(load_alert_log())
     save_alert_log(alert_log)
-    prune_audit_log(days=7)
 
     process_alert_requests(simple_gmail_session, simple_admin_session, USERS_LIST, team_leader_members, alert_log)
 
     save_alert_log(alert_log)
-
-if __name__ == "__main__":
-    main()
