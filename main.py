@@ -39,6 +39,9 @@ STATUS_DECLINED = "declined"
 
 env = Environment(loader=FileSystemLoader(TEMPLATE_DIR), autoescape=select_autoescape(["html", "xml"]))
 
+# Ця функція робить HTTP-запити через передану сесію (AuthorizedSession) з підтримкою пагінації та повторних спроб.
+# Переважно використовується для викликів Google Admin API: вона збирає сторінки відповіді (nextPageToken),
+# повертає список JSON-відповідей і логірує/завершує виконання при помилці або при перевищенні таймауту.
 def create_session(max_time, session, type, url, json=None, params=None, query_type=""):
     timer = 2
     response = None
@@ -82,11 +85,15 @@ def create_session(max_time, session, type, url, json=None, params=None, query_t
 
 logging.basicConfig(filename='./main.log', level=logging.ERROR)
 
+#Проста обгортка для логування: записує повідомлення у файл логів (main.log) через logging та одночасно
+# виводить його на консоль з міткою часу. Використовується скрізь для централізованого ведення подій і помилок.
 def log(message):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     logging.error(f"{timestamp} - {message}")
     print(f"{timestamp} - {message}")
 
+# Завантажує локальний JSON-файл з історією сповіщень (LOG_FILE) у пам’ять як словник. Якщо файл відсутній —
+# повертає пустий словник; при проблемі з читанням робить бекап і теж повертає пусту структуру.
 def load_alert_log():
     if not os.path.exists(LOG_FILE):
         return {}
@@ -101,12 +108,16 @@ def load_alert_log():
                 pass
             return {}
 
+# Атомарно зберігає словник логів у LOG_FILE: записує у тимчасовий файл і замінює основний файл.
+# Гарантує цілісність файлу при записі.
 def save_alert_log(log):
     tmp = LOG_FILE + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(log, f, indent=2, ensure_ascii=False)
     os.replace(tmp, LOG_FILE)
 
+# Обрізає запис у логах, залишаючи тільки записи молодші за вказану кількість днів (за замовчуванням 7).
+# Перевіряє fetched_at у кожному записі і відкидає некоректні або старі записи.
 def prune_alert_log(log, days=7):
     cutoff = datetime.now(timezone.utc) - timedelta(days=days)
     new = {}
@@ -124,6 +135,8 @@ def prune_alert_log(log, days=7):
             continue
     return new
 
+# Перевіряє, чи знаходиться шлях організаційної одиниці користувача під вказаним шляхом OU (наприклад "/A/B" під "/A").
+# Нормалізує слеші і пробіли та повертає булеве значення — використовується для визначення відповідних тімлідів по ієрархії.
 def is_under(user_ou: str, ou_path: str) -> bool:
     def norm(p: str) -> str:
         return p.strip().rstrip('/')
@@ -135,11 +148,15 @@ def is_under(user_ou: str, ou_path: str) -> bool:
         return True
     return u.startswith(o + '/')
 
+# Генерує унікальний хеш (sha256) для сповіщення на основі email користувача, IP та дати/часу.
+# Використовується як ідентифікатор запису в alert_log і як значення, яке відправляється тімліду для підтвердження/відхилення.
 def generate_hash(user_email, ip, date):
     base = f"{user_email}__{ip}__{date}"
     return hashlib.sha256(base.encode("utf-8")).hexdigest()
 
 # ========= EMAIL TEMPLATES & SENDING ========= #
+# Рендерить HTML-лист через Jinja2-шаблон (email_template.html) з переданими параметрами
+# (title, body, footer, action_block). Повертає готовий HTML-контент для надсилання.
 def render_email_template(title, body, footer=None, action_block=None):
     template = env.get_template("email_template.html")
     html = template.render(
@@ -151,6 +168,8 @@ def render_email_template(title, body, footer=None, action_block=None):
     )
     return html
 
+# Формує HTML-блок з інформацією по сповіщенню (користувач, IP, дата/час) у зручному для вставки в листі вигляді.
+# Допоміжна функція для уніфікованого футеру.
 def make_alert_footer(alert_info):
     return (
         f"Користувач: <b>{alert_info['user']}</b><br>"
@@ -158,6 +177,8 @@ def make_alert_footer(alert_info):
         f"Дата/час: <b>{alert_info['date']}</b>"
     )
 
+# Надсилає готовий MIME-повідомлення через Gmail API: кодує у base64-url і викликає users.messages.send.
+# При помилці логірує подію з subject листа.
 def send_gmail(gmail_svc, msg_obj):
     try:
         raw = base64.urlsafe_b64encode(msg_obj.as_bytes()).decode()
@@ -165,6 +186,8 @@ def send_gmail(gmail_svc, msg_obj):
     except Exception as e:
         log({"event": "gmail_send_error", "error": str(e), "subject": msg_obj.get("subject")})
 
+# Готує і відсилає тімліду повідомлення про підозрілий вхід із двома кнопками (mailto-посиланнями) для підтвердження
+# або відхилення входу. Формує HTML через render_email_template, вкладає унікальний хеш у тіло посилання і логірує відправку.
 def send_team_leader_alert(gmail_svc, to_address, alert_info, unique_hash):
     body_content = (
         "Повідомляємо, що служба безпеки Google Workspace зафіксувала "
@@ -224,6 +247,8 @@ def send_team_leader_alert(gmail_svc, to_address, alert_info, unique_hash):
     send_gmail(gmail_svc, msg)
     log({"event": "alert_email_sent", "to": to_address, "user": alert_info["user"], "hash": unique_hash})
 
+# Надсилає тімлідам повідомлення про результат обробки (accept або decline). У випадку decline включає новий пароль.
+# Використовується після того, як адміністратор розблокував обліковий запис та, за потреби, змінив пароль.
 def send_team_leader_notification(gmail_svc, to_address, alert_info, action, new_password=None):
     footer = make_alert_footer(alert_info)
     if action == "accept":
@@ -251,6 +276,8 @@ def send_team_leader_notification(gmail_svc, to_address, alert_info, action, new
 
 ########################################################################################################################
 
+# Отримує перелік повідомлень (ids) з Gmail за вказаним запитом q, обробляючи пагінацію.
+# Повертає список знайдених повідомлень (часто лише id та threadId).
 def list_messages(gmail_svc, q):
     results = []
     page_token = None
@@ -266,11 +293,15 @@ def list_messages(gmail_svc, q):
             break
     return results
 
+# Побудова запиту для пошуку листів від певної адреси з шаблоном у темі/тексті за останні 7 днів.
+# Викликає list_messages для виконання запиту і повертає результати.
 def search_mail(gmail_service, pattern, email):
     after_ts = int((datetime.now(timezone.utc) - timedelta(days=7)).timestamp())
     q = f'from:{email} {pattern} after:{after_ts}'
     return list_messages(gmail_service, q)
 
+# Витягує та декодує тіло листа з повної структури повідомлення Gmail: підтримує multipart/parts, base64/url-safe,
+# quoted-printable, text/plain та text/html; робить очищення HTML у текст і повертає очищений текстовий вміст або None при невдачі.
 def extract_content(msg_detail):
     payload = msg_detail.get("payload", {})
     data = None
@@ -335,6 +366,8 @@ def extract_content(msg_detail):
 
 ########################################################################################################################
 
+# Викликає Admin SDK для призупинення користувача (suspended=True).
+# Логірує успіх або помилку і повертає булевий результат операції.
 def suspend_user(admin_session, user_email):
     try:
         admin_session.users().update(userKey=user_email, body={"suspended": True}).execute()
@@ -344,6 +377,8 @@ def suspend_user(admin_session, user_email):
         log({"event": "suspend_user_error", "user": user_email, "error": str(e)})
         return False
 
+# Викликає Admin SDK для зняття призупинення з користувача (suspended=False).
+# Логірує результат і повертає булеве значення успіху.
 def unblock_user(admin_session, user_email):
     try:
         admin_session.users().update(userKey=user_email, body={"suspended": False}).execute()
@@ -353,10 +388,14 @@ def unblock_user(admin_session, user_email):
         log({"event": "unsuspend_user_error", "user": user_email, "error": str(e)})
         return False
 
+# Генерує криптографічно більш-менш надійний випадковий пароль заданої довжини (за замовчуванням 20) з літер та цифр,
+# використовуючи SystemRandom.
 def generate_password(length=20):
     characters = string.ascii_letters + string.digits
     return ''.join(random.SystemRandom().choice(characters) for _ in range(length))
 
+# Встановлює новий пароль для користувача через Admin SDK і примушує змінити пароль при наступному вході
+# (changePasswordAtNextLogin=True). Повертає згенерований пароль або None при помилці, а також логірує подію.
 def set_password(admin_session, user_email):
     password = generate_password()
     try:
@@ -372,6 +411,9 @@ def set_password(admin_session, user_email):
 
 ########################################################################################################################
 
+# Обробляє відповіді HANDLER_USER на листи з результатом ("Accept: Suspicious login" / "Decline: Suspicious login").
+# Валідовує відправника та хеш у тілі листа, оновлює alert_log (status/actioned_at), знімає призупинення, у випадку decline —
+# змінює пароль, та надсилає тімлідам повідомлення про результат. Логірує всі ключові кроки.
 def process_action_responses(gmail_session, admin_session, alert_log):
     for message in search_mail(gmail_session, '(subject:"Accept: Suspicious login" OR subject:"Decline: Suspicious login")', HANDLER_USER):
         message_id = message.get("id")
@@ -431,6 +473,10 @@ def process_action_responses(gmail_session, admin_session, alert_log):
                 send_team_leader_notification(gmail_session, tl, alert_info, action="decline", new_password=new_password)
             log({"event": "processed_decline", "hash": hash_value, "user": alert['user']})
 
+# Шукає нові вхідні сповіщення від ALERT_SENDER_EMAIL ("Alert: Suspicious login"), парсить потрібні поля
+# (User, Attempted Login IP, Activity Date), генерує унікальний хеш, призупиняє обліковий запис користувача,
+# визначає відповідних тімлідів за OU і надсилає їм початкове сповіщення з кнопками. Записує новий запис у alert_log
+# з інформацією про сповіщення і статусом suspended.
 def process_alert_requests(gmail_session, admin_session, users_list, team_leader_members, alert_log):
     new_alerts = []
 
@@ -519,6 +565,7 @@ def process_alert_requests(gmail_session, admin_session, users_list, team_leader
 #  MAIN MAIN MAIN MAIN MAIN MAIN MAIN MAIN MAIN MAIN MAIN MAIN MAIN MAIN MAIN MAIN MAIN MAIN MAIN MAIN MAIN MAIN MAIN  #
 ########################################################################################################################
 
+# Опис у документації.
 if __name__ == "__main__":
     credentials = service_account.Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=SCOPES)
     simple_gmail_session = build(serviceName="gmail", version="v1", credentials=credentials.with_subject(HANDLER_USER))
