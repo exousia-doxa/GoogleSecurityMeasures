@@ -83,7 +83,7 @@ def create_session(max_time, session, type, url, json=None, params=None, query_t
             log(f"Request error | type: {type}, url: {url}, response: {response}. Error: {str(e)}")
             sys.exit(1)
 
-logging.basicConfig(filename='./main.log', level=logging.ERROR)
+logging.basicConfig(filename='main.log', level=logging.ERROR)
 
 #Проста обгортка для логування: записує повідомлення у файл логів (main.log) через logging та одночасно
 # виводить його на консоль з міткою часу. Використовується скрізь для централізованого ведення подій і помилок.

@@ -1,0 +1,18 @@
+version: "3.8"
+
+services:
+  google_security_measures:
+    container_name: google_security_measures
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: google_security_measures:latest
+    restart: unless-stopped
+
+    volumes:
+      - .:/app
+    working_dir: /app
+
+networks:
+  google_security_measures_network:
+    driver: bridge
